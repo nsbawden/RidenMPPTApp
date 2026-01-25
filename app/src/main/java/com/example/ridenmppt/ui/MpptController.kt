@@ -19,7 +19,7 @@ class MpptController(
 
         private const val STATE_BATT_FULL = "FUL"
         private const val STATE_CONST_V = "---"
-        private const val STATE_MAX_R = "RUN"
+        private const val STATE_MAX_R = "MAX"
     }
 
     data class Status(
@@ -112,10 +112,10 @@ class MpptController(
         val V3 = 1.00
         val V4 = 1.50
 
-        val HUGE_STEP_UP = 0.80
-        val HUGE_STEP_DN = 0.80
-        val FAR_STEP_UP = 0.20
-        val FAR_STEP_DN = 0.20
+        val HUGE_STEP_UP = 1.00
+        val HUGE_STEP_DN = 1.00
+        val FAR_STEP_UP = 0.30
+        val FAR_STEP_DN = 0.30
         val MID_STEP_UP = 0.10
         val MID_STEP_DN = 0.10
         val NEAR_STEP_UP = 0.05
