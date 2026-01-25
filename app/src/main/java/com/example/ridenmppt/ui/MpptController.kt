@@ -17,8 +17,8 @@ class MpptController(
         private const val REG_ON1 = 0x0011
         private const val REG_ON2 = 0x0012
 
-        private const val STATE_BATT_FULL = "FULL"
-        private const val STATE_CONST_V = "HOLD"
+        private const val STATE_BATT_FULL = "FUL"
+        private const val STATE_CONST_V = "---"
         private const val STATE_MAX_R = "RUN"
     }
 
@@ -360,28 +360,28 @@ class MpptController(
 
                 val hccTag = if (!isVLtd) " HCC=${"%+.2f".format(hccOffset)}" else ""
 
-                emit(
-                    "VSET=${"%.2f".format(st.vset)}V OUT ${"%.2f".format(st.outv)}V ${"%.2f".format(st.iout)}A | " +
-                            "PWR=${"%.1f".format(st.pout)}W VIN=${"%.2f".format(st.vin)} " +
-                            "TGT=${"%.2f".format(targetVin)} ISET=${"%.2f".format(isetCmd)} ${"%+.2f".format(stepUsed)} " +
-                            (if (isVLtd) "[${band}]" else " $band ") + " $statusNow$hccTag"
-                )
+//                emit(
+//                    "VSET=${"%.2f".format(st.vset)}V OUT ${"%.2f".format(st.outv)}V ${"%.2f".format(st.iout)}A | " +
+//                            "PWR=${"%.1f".format(st.pout)}W VIN=${"%.2f".format(st.vin)} " +
+//                            "TGT=${"%.2f".format(targetVin)} ISET=${"%.2f".format(isetCmd)} ${"%+.2f".format(stepUsed)} " +
+//                            (if (isVLtd) "[${band}]" else " $band ") + " $statusNow$hccTag"
+//                )
             }
 
-//            onUiStatus?.invoke(
-//                UiStatus(
-//                    vset = st.vset,
-//                    outv = st.outv,
-//                    iout = st.iout,
-//                    pout = st.pout,
-//                    vin = st.vin,
-//                    targetVin = targetVin,
-//                    isetCmd = isetCmd,
-//                    band = band.trim(),
-//                    mode = statusNow,
-//                    hccOffset = hccOffset,
-//                )
-//            )
+            onUiStatus?.invoke(
+                UiStatus(
+                    vset = st.vset,
+                    outv = st.outv,
+                    iout = st.iout,
+                    pout = st.pout,
+                    vin = st.vin,
+                    targetVin = targetVin,
+                    isetCmd = isetCmd,
+                    band = band.trim(),
+                    mode = statusNow,
+                    hccOffset = hccOffset,
+                )
+            )
 
             delay((LOOP_DELAY_S * 1000.0).toLong())
         }

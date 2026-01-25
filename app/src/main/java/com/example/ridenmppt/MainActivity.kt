@@ -1,17 +1,23 @@
 package com.example.ridenmppt
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
+import android.os.PowerManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -45,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationCompat
 import com.example.ridenmppt.ui.MpptController
 import com.example.ridenmppt.ui.ModbusRtu
 import com.hoho.android.usbserial.driver.UsbSerialDriver
@@ -61,7 +68,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Freeze UI in portrait (belt + suspenders; manifest also enforces).
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+
         setContent { MpptApp() }
+    }
+
+    private fun startKeepAlive() {
+        val i = Intent(this, KeepAliveService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
+    }
+
+    private fun stopKeepAlive() {
+        stopService(Intent(this, KeepAliveService::class.java))
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -76,7 +96,7 @@ class MainActivity : ComponentActivity() {
         var selected by remember { mutableStateOf<UsbSerialDriver?>(null) }
 
         var slaveText by remember { mutableStateOf("1") }
-        var targetText by remember { mutableStateOf("33.0") }
+        var targetText by remember { mutableStateOf("32.5") }
 
         val logs = remember { mutableStateListOf<String>() }
         fun emit(s: String) {
@@ -124,7 +144,17 @@ class MainActivity : ComponentActivity() {
             } else {
                 registerReceiver(receiver, filter)
             }
-            onDispose { unregisterReceiver(receiver) }
+            onDispose {
+                unregisterReceiver(receiver)
+                // If the UI is leaving and the controller is still marked running, stop cleanly.
+                // (If you want it to survive UI teardown, we can move the controller into the service.)
+                if (running) {
+                    running = false
+                    job?.cancel()
+                    job = null
+                    stopKeepAlive()
+                }
+            }
         }
 
         fun refreshDevices() {
@@ -149,6 +179,7 @@ class MainActivity : ComponentActivity() {
             running = false
             job?.cancel()
             job = null
+            stopKeepAlive()
         }
 
         fun startController(driver: UsbSerialDriver, slave: Int, target: Double) {
@@ -188,7 +219,8 @@ class MainActivity : ComponentActivity() {
             }
 
             running = true
-            emit("Connected VID=${device.vendorId} PID=${device.productId} @115200")
+            startKeepAlive()
+            emit("Connected VID=${device.vendorId} PID=${device.productId} @115200 (keep-alive ON)")
 
             // IMPORTANT:
             // ModbusRtu debug output is OFF by default (too spammy for phone UI).
@@ -208,6 +240,7 @@ class MainActivity : ComponentActivity() {
                 } finally {
                     running = false
                     try { port.close() } catch (_: Exception) { }
+                    stopKeepAlive()
                     emit("Stopped")
                 }
             }
@@ -278,7 +311,7 @@ class MainActivity : ComponentActivity() {
         fun ControlsPanel(modifier: Modifier = Modifier) {
             Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = { refreshDevices() }, enabled = !running) { Text("Refresh") }
+                    Button(onClick = { refreshDevices() }, enabled = !running) { Text("RD USB") }
 
                     Button(
                         onClick = {
@@ -292,7 +325,7 @@ class MainActivity : ComponentActivity() {
 
                     Button(onClick = { stopController() }, enabled = running) { Text("Stop") }
 
-                    Button(onClick = { copyLogsToClipboard() }) { Text("Copy") }
+                    Button(onClick = { copyLogsToClipboard() }) { Text("Cpy") }
                 }
 
                 var expanded by remember { mutableStateOf(false) }
@@ -393,5 +426,63 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+}
+
+/**
+ * KeepAliveService
+ *
+ * Foreground service + PARTIAL_WAKE_LOCK so the CPU keeps running even with screen off.
+ * This is the standard Android approach to "keep running until the battery runs out"
+ * (still subject to force-stop, OEM battery killers, and extreme low-memory situations).
+ */
+class KeepAliveService : Service() {
+
+    companion object {
+        private const val CH_ID = "ridenmppt_keepalive"
+        private const val CH_NAME = "RidenMPPT"
+        private const val NOTIF_ID = 1001
+        private const val WAKE_TAG = "RidenMPPT:KeepAlive"
+    }
+
+    private var wl: PowerManager.WakeLock? = null
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val ch = NotificationChannel(CH_ID, CH_NAME, NotificationManager.IMPORTANCE_LOW)
+            nm.createNotificationChannel(ch)
+        }
+
+        val notif = NotificationCompat.Builder(this, CH_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("RidenMPPT running")
+            .setContentText("Keeping CPU awake while screen is off")
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        startForeground(NOTIF_ID, notif)
+
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_TAG).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    override fun onDestroy() {
+        try { wl?.release() } catch (_: Exception) { }
+        wl = null
+        super.onDestroy()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // If killed, ask system to recreate (best-effort).
+        return START_STICKY
     }
 }
