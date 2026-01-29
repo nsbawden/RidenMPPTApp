@@ -4,10 +4,21 @@ import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.round
 
+class MpptRuntimeConfig(
+    slave: Int,
+    targetUserV: Double,
+    hccQuietS: Double,
+) {
+    @Volatile var slave: Int = slave
+    @Volatile var targetUserV: Double = targetUserV
+    @Volatile var hccQuietS: Double = hccQuietS
+}
+
 class MpptController(
     private val io: ModbusIo,
     private val emit: (String) -> Unit,
     private val onUiStatus: ((UiStatus) -> Unit)? = null,
+    private val runtime: MpptRuntimeConfig,
 ) {
 
     companion object {
@@ -84,7 +95,7 @@ class MpptController(
         io.writeSingleReg(slave, REG_ON2, v)
     }
 
-    suspend fun run(vtarget: Double, slave: Int, stopRequested: () -> Boolean) {
+    suspend fun run(stopRequested: () -> Boolean) {
         val VSET_DROP_BATT_FULL = 0.60
 
         val VIN_BAND = 0.00
@@ -99,7 +110,6 @@ class MpptController(
         val HCC_STEP_V = 0.10
         val HCC_OFFSET_MIN_V = -2.00
         val HCC_OFFSET_MAX_V = 2.00
-        val HCC_QUIET_S = 90.0
         val HCC_DECAY_STABLE_EPS = 0.50
 
         val RECOVERY_WINDOW_S = 6.0
@@ -131,7 +141,13 @@ class MpptController(
 
         val HIGH_CURRENT_I = FULL_I + 8.0
 
+        val MAX_CONSEC_READ_FAIL = 3
+        var consecReadFail = 0
+
         var isVLtd = false
+
+        // Slave is locked for the run (per UI requirement).
+        val slave = runtime.slave
 
         try {
             readStatus(slave)
@@ -145,6 +161,9 @@ class MpptController(
             emit("ERR setOutput: ${e.message}")
         }
 
+        //
+        // Initial VSET on startup
+        //
         try {
             setVset(slave, 15.0)
             delay(100)
@@ -152,7 +171,10 @@ class MpptController(
             emit("ERR init VSET: ${e.message}")
         }
 
-        var isetCmd = 0.01
+        //
+        // Initial ISET on startup
+        //
+        var isetCmd = 5.00
         try {
             setIset(slave, isetCmd)
             delay(100)
@@ -160,26 +182,36 @@ class MpptController(
             emit("ERR init ISET: ${e.message}")
         }
 
-        val T_USER = vtarget
-
         var hccOffset = 0.0
         var lastNoHccMs = System.currentTimeMillis()
         var doingHcc = false
         var firstHccIgnored = false
         var lastHccExitMs = Long.MIN_VALUE
 
-        var targetVin = quantVolts(T_USER + hccOffset)
+        var tUserNow = runtime.targetUserV
+        var targetVin = quantVolts(tUserNow + hccOffset)
 
         var vsetBase: Double? = null
         var vsetReduced = false
 
-        emit("START T_USER=${"%.2f".format(T_USER)}V (TARGET_VIN=${"%.2f".format(targetVin)}V) LOOP=${"%.2f".format(LOOP_DELAY_S)}s")
+        emit(
+            "START T_USER=${"%.2f".format(tUserNow)}V " +
+                    "(TARGET_VIN=${"%.2f".format(targetVin)}V) " +
+                    "HCC_QUIET_S=${"%.1f".format(runtime.hccQuietS)} " +
+                    "LOOP=${"%.2f".format(LOOP_DELAY_S)}s"
+        )
 
         while (!stopRequested()) {
             val st = try {
-                readStatus(slave)
+                val s = readStatus(slave)
+                consecReadFail = 0
+                s
             } catch (e: Exception) {
+                consecReadFail += 1
                 emit("ERR readStatus: ${e.message}")
+                if (consecReadFail >= MAX_CONSEC_READ_FAIL) {
+                    throw RuntimeException("USB I/O lost (readStatus failing)")
+                }
                 delay(500)
                 continue
             }
@@ -201,25 +233,27 @@ class MpptController(
                 else -> STATE_MAX_R
             }
 
+            tUserNow = runtime.targetUserV
+
             if (!isVLtd) {
-                targetVin = quantVolts(T_USER + hccOffset)
+                targetVin = quantVolts(tUserNow + hccOffset)
             } else {
                 lastNoHccMs = System.currentTimeMillis()
             }
 
-            val hccTrigger = if (!isVLtd) st.vin < (targetVin - HARD_DROP) else false
+            val hccTrigger = if (!isVLtd) st.vin < (targetVin - 5.0) else false
 
             if (hccTrigger && !doingHcc) {
                 doingHcc = true
                 lastNoHccMs = System.currentTimeMillis()
 
                 if (firstHccIgnored) {
-                    hccOffset = clamp(hccOffset + HCC_STEP_V, HCC_OFFSET_MIN_V, HCC_OFFSET_MAX_V)
+                    hccOffset = clamp(hccOffset + HCC_STEP_V, -2.00, 2.00)
                 } else {
                     firstHccIgnored = true
                 }
 
-                targetVin = quantVolts(T_USER + hccOffset)
+                targetVin = quantVolts(tUserNow + hccOffset)
             }
 
             if (!hccTrigger && doingHcc) {
@@ -229,11 +263,13 @@ class MpptController(
             }
 
             val nowMs = System.currentTimeMillis()
-            if (!isVLtd && !doingHcc && (nowMs - lastNoHccMs) >= (HCC_QUIET_S * 1000.0).toLong()) {
+            val quietMs = (runtime.hccQuietS * 1000.0).toLong()
+
+            if (!isVLtd && !doingHcc && (nowMs - lastNoHccMs) >= quietMs) {
                 if (st.vin >= (targetVin - HCC_DECAY_STABLE_EPS)) {
-                    hccOffset = clamp(hccOffset - HCC_STEP_V, HCC_OFFSET_MIN_V, HCC_OFFSET_MAX_V)
+                    hccOffset = clamp(hccOffset - HCC_STEP_V, -2.00, 2.00)
                     lastNoHccMs = nowMs
-                    targetVin = quantVolts(T_USER + hccOffset)
+                    targetVin = quantVolts(tUserNow + hccOffset)
                 }
             }
 
@@ -288,9 +324,9 @@ class MpptController(
                     band = "FI"
                 }
 
-                if ((System.currentTimeMillis() - lastHccExitMs) <= (RECOVERY_WINDOW_S * 1000.0).toLong()) {
-                    if (errVin > RECOVERY_ERR_V && st.pout >= RECOVERY_MIN_POUT_W) {
-                        stepUp = minOf(stepUp * RECOVERY_GAIN, HUGE_STEP_UP)
+                if ((System.currentTimeMillis() - lastHccExitMs) <= (6.0 * 1000.0).toLong()) {
+                    if (errVin > 1.50 && st.pout >= 100.0) {
+                        stepUp = minOf(stepUp * 2.0, HUGE_STEP_UP)
                     }
                 }
 
@@ -299,11 +335,11 @@ class MpptController(
 
                 var stepUsed = 0.0
                 var newIset = when {
-                    errVin > VIN_BAND -> {
+                    errVin > 0.0 -> {
                         stepUsed = stepUp
                         isetCmd + stepUp
                     }
-                    errVin < -VIN_BAND -> {
+                    errVin < -0.0 -> {
                         stepUsed = -stepDn
                         isetCmd - stepDn
                     }
@@ -357,15 +393,6 @@ class MpptController(
                         }
                     }
                 }
-
-                val hccTag = if (!isVLtd) " HCC=${"%+.2f".format(hccOffset)}" else ""
-
-//                emit(
-//                    "VSET=${"%.2f".format(st.vset)}V OUT ${"%.2f".format(st.outv)}V ${"%.2f".format(st.iout)}A | " +
-//                            "PWR=${"%.1f".format(st.pout)}W VIN=${"%.2f".format(st.vin)} " +
-//                            "TGT=${"%.2f".format(targetVin)} ISET=${"%.2f".format(isetCmd)} ${"%+.2f".format(stepUsed)} " +
-//                            (if (isVLtd) "[${band}]" else " $band ") + " $statusNow$hccTag"
-//                )
             }
 
             onUiStatus?.invoke(
