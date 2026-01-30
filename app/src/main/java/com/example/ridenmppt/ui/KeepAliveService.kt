@@ -64,6 +64,7 @@ class KeepAliveService : Service() {
         private const val PREFS = "ridenmppt"
         private const val PREF_ENERGY_TOTAL_WH = "energy_total_wh"
         private const val PREF_ENERGY_DAY_WH = "energy_day_wh"
+        private const val PREF_ENERGY_YDAY_WH = "energy_yday_wh"
         private const val PREF_ENERGY_DAY_KEY = "energy_day_key"
         private const val PREF_ENERGY_LAST_SAVE_MS = "energy_last_save_ms"
     }
@@ -84,6 +85,7 @@ class KeepAliveService : Service() {
 
     // Energy accumulation (Wh)
     private var whToday = 0.0
+    private var whYesterday = 0.0
     private var whSinceReset = 0.0
     private var dayKey = 0
 
@@ -97,26 +99,33 @@ class KeepAliveService : Service() {
         return y * 1000 + d
     }
 
+    private fun rolloverDayIfNeeded(newDayKey: Int): Boolean {
+        if (dayKey == newDayKey) return false
+        dayKey = newDayKey
+        whYesterday = whToday
+        whToday = 0.0
+        return true
+    }
+
     private fun loadEnergy() {
         dayKey = prefs.getInt(PREF_ENERGY_DAY_KEY, 0)
         whToday = prefs.getFloat(PREF_ENERGY_DAY_WH, 0.0f).toDouble()
+        whYesterday = prefs.getFloat(PREF_ENERGY_YDAY_WH, 0.0f).toDouble()
         whSinceReset = prefs.getFloat(PREF_ENERGY_TOTAL_WH, 0.0f).toDouble()
         lastPersistMs = prefs.getLong(PREF_ENERGY_LAST_SAVE_MS, 0L)
 
         val k = nowDayKey()
         if (dayKey == 0) dayKey = k
-        if (dayKey != k) {
-            dayKey = k
-            whToday = 0.0
-        }
+        if (rolloverDayIfNeeded(k)) persistEnergy()
 
-        MpptBus.setEnergy(whToday, whSinceReset)
+        MpptBus.setEnergy(whToday, whYesterday, whSinceReset)
     }
 
     private fun persistEnergy() {
         prefs.edit()
             .putInt(PREF_ENERGY_DAY_KEY, dayKey)
             .putFloat(PREF_ENERGY_DAY_WH, whToday.toFloat())
+            .putFloat(PREF_ENERGY_YDAY_WH, whYesterday.toFloat())
             .putFloat(PREF_ENERGY_TOTAL_WH, whSinceReset.toFloat())
             .putLong(PREF_ENERGY_LAST_SAVE_MS, SystemClock.elapsedRealtime())
             .apply()
@@ -124,7 +133,7 @@ class KeepAliveService : Service() {
 
     private fun resetEnergySinceReset() {
         whSinceReset = 0.0
-        MpptBus.setEnergy(whToday, whSinceReset)
+        MpptBus.setEnergy(whToday, whYesterday, whSinceReset)
         persistEnergy()
         MpptBus.log("Energy reset (Wh since reset = 0)")
     }
@@ -134,10 +143,7 @@ class KeepAliveService : Service() {
 
         // Day rollover
         val k = nowDayKey()
-        if (dayKey != k) {
-            dayKey = k
-            whToday = 0.0
-        }
+        val rolled = rolloverDayIfNeeded(k)
 
         if (lastEnergyMs != 0L && poutW != null) {
             val dtMs = nowMs - lastEnergyMs
@@ -152,10 +158,10 @@ class KeepAliveService : Service() {
         }
 
         lastEnergyMs = nowMs
-        MpptBus.setEnergy(whToday, whSinceReset)
+        MpptBus.setEnergy(whToday, whYesterday, whSinceReset)
 
         // Persist occasionally so it survives service restarts
-        if (lastPersistMs == 0L || (nowMs - lastPersistMs) >= 20_000L) {
+        if (rolled || lastPersistMs == 0L || (nowMs - lastPersistMs) >= 20_000L) {
             lastPersistMs = nowMs
             persistEnergy()
         }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 data class EnergyStatus(
     val whToday: Double = 0.0,
+    val whYesterday: Double = 0.0,
     val whSinceReset: Double = 0.0,
 )
 
@@ -26,6 +27,6 @@ object MpptBus {
 
     fun setRunning(v: Boolean) { _running.value = v }
     fun setUiStatus(v: MpptController.UiStatus?) { _uiStatus.value = v }
-    fun setEnergy(whToday: Double, whSinceReset: Double) { _energy.value = EnergyStatus(whToday, whSinceReset) }
+    fun setEnergy(whToday: Double, whYesterday: Double, whSinceReset: Double) { _energy.value = EnergyStatus(whToday, whYesterday, whSinceReset) }
     fun log(line: String) { _logs.tryEmit(line) }
 }

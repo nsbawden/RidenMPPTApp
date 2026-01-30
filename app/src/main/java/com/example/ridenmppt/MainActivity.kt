@@ -41,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontFamily
@@ -48,6 +49,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.example.ridenmppt.ui.theme.RidenMPPTTheme
+
 
 class MainActivity : ComponentActivity() {
 
@@ -60,6 +62,11 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun MpptApp() {
+
+        val VoltageColor = Color(0xFFFFC107)
+        val CurrentColor = Color(0xFFE91E63)
+        val PowerColor = Color(0xFF1997FB)
+
         val ctx = this
         val cfg = LocalConfiguration.current
         val isLandscape = (cfg.orientation == Configuration.ORIENTATION_LANDSCAPE)
@@ -225,30 +232,25 @@ class MainActivity : ComponentActivity() {
 
             Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    ValueBox("VIN", st?.vin?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f))
-                    ValueBox("TGT", st?.targetVin?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f))
+                    ValueBox("VIN", st?.vin?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f), valueColor = VoltageColor)
+                    ValueBox("TGT", st?.targetVin?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f), valueColor = VoltageColor)
                     ValueBox("MODE", "$mode $band", Modifier.weight(1f))
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    ValueBox("VOUT", st?.outv?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f))
-                    ValueBox("IOUT", st?.iout?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f))
-                    ValueBox(
-                        "PWR",
-                        st?.pout?.let { "%.1f".format(it) } ?: "-",
-                        Modifier.weight(1f),
-                        valueColor = androidx.compose.ui.graphics.Color(0xFFFFC107) // gold
-                    )
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    ValueBox("VSET", st?.vset?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f))
-                    ValueBox("ISET", st?.isetCmd?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f))
+                    ValueBox("VSET", st?.vset?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f), valueColor = VoltageColor)
+                    ValueBox("ISET", st?.isetCmd?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f), valueColor = CurrentColor)
                     ValueBox("HCC", hcc, Modifier.weight(1f))
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    ValueBox("Wh Today", whTodayText, Modifier.weight(1f))
+                    ValueBox("VOUT", st?.outv?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f), valueColor = VoltageColor)
+                    ValueBox("IOUT", st?.iout?.let { "%.2f".format(it) } ?: "-", Modifier.weight(1f), valueColor = CurrentColor)
+                    ValueBox("WATTS", st?.pout?.let { "%.1f".format(it) } ?: "-", Modifier.weight(1f), valueColor = PowerColor)
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    ValueBox("Wh Today", whTodayText, Modifier.weight(1f), valueColor = PowerColor)
                 }
             }
         }
@@ -334,6 +336,7 @@ class MainActivity : ComponentActivity() {
 
                 if (showSettings) {
                     val whSinceResetText = "%.1f".format(energy.whSinceReset)
+                    val whYesterdayText = "%.1f".format(energy.whYesterday)
 
                     AlertDialog(
                         onDismissRequest = { showSettings = false },
@@ -363,6 +366,14 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     Text("Wh this cycle")
                                     Text(whSinceResetText, fontFamily = FontFamily.Monospace)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Wh yesterday")
+                                    Text(whYesterdayText, fontFamily = FontFamily.Monospace)
                                 }
 
                                 Button(onClick = { resetEnergyPressed() }) {

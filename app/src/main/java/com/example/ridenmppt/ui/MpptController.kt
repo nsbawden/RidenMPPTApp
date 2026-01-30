@@ -292,12 +292,6 @@ class MpptController(
                     delay(500)
                     continue
                 }
-
-                emit(
-                    "FAST RECOVER TGT=${"%.2f".format(targetVin)} HCC=${"%+.2f".format(hccOffset)} " +
-                            "IOUT=${"%.2f".format(st.iout)}A PWR=${"%.1f".format(st.pout)}W " +
-                            "VIN=${"%.2f".format(st.vin)} ISET->${"%.2f".format(isetCmd)} $statusNow"
-                )
             } else {
                 var stepUp: Double
                 var stepDn: Double
