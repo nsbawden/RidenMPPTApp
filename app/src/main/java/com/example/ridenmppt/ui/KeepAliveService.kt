@@ -67,6 +67,9 @@ class KeepAliveService : Service() {
         private const val PREF_ENERGY_YDAY_WH = "energy_yday_wh"
         private const val PREF_ENERGY_DAY_KEY = "energy_day_key"
         private const val PREF_ENERGY_LAST_SAVE_MS = "energy_last_save_ms"
+
+        // Energy integration guards
+        private const val ENERGY_MAX_DT_MS = 2000L // cap long stalls so one stale sample can't represent a huge gap
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -91,6 +94,7 @@ class KeepAliveService : Service() {
 
     private var lastEnergyMs = 0L
     private var lastPersistMs = 0L
+    private var lastPoutW: Double? = null
 
     private fun nowDayKey(): Int {
         val c = Calendar.getInstance()
@@ -141,15 +145,28 @@ class KeepAliveService : Service() {
     private fun updateEnergyFromPower(poutW: Double?) {
         val nowMs = SystemClock.elapsedRealtime()
 
-        // Day rollover
+        // Day rollover: do NOT integrate across midnight boundary (prevents mis-attribution).
         val k = nowDayKey()
         val rolled = rolloverDayIfNeeded(k)
+        if (rolled) {
+            lastEnergyMs = nowMs
+            lastPoutW = poutW
+            MpptBus.setEnergy(whToday, whYesterday, whSinceReset)
+            lastPersistMs = nowMs
+            persistEnergy()
+            return
+        }
 
-        if (lastEnergyMs != 0L && poutW != null) {
-            val dtMs = nowMs - lastEnergyMs
+        // Trapezoidal integration using last and current samples, with dt cap to avoid long-stall distortion.
+        val prevMs = lastEnergyMs
+        val prevP = lastPoutW
+        if (prevMs != 0L && prevP != null && poutW != null) {
+            var dtMs = nowMs - prevMs
             if (dtMs > 0) {
+                if (dtMs > ENERGY_MAX_DT_MS) dtMs = ENERGY_MAX_DT_MS
                 val dtHours = dtMs.toDouble() / 3_600_000.0
-                val addWh = poutW * dtHours
+                val pAvg = (prevP + poutW) * 0.5
+                val addWh = pAvg * dtHours
                 if (addWh > 0.0) {
                     whToday += addWh
                     whSinceReset += addWh
@@ -157,11 +174,14 @@ class KeepAliveService : Service() {
             }
         }
 
+        // If current sample is null, break the chain so we don't integrate a later sample over this gap.
         lastEnergyMs = nowMs
+        lastPoutW = poutW
+
         MpptBus.setEnergy(whToday, whYesterday, whSinceReset)
 
         // Persist occasionally so it survives service restarts
-        if (rolled || lastPersistMs == 0L || (nowMs - lastPersistMs) >= 20_000L) {
+        if (lastPersistMs == 0L || (nowMs - lastPersistMs) >= 20_000L) {
             lastPersistMs = nowMs
             persistEnergy()
         }
