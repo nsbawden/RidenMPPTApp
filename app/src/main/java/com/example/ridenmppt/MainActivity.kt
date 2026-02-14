@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
 
         // Draft text in boxes (user edits here). Values apply to controller only on commit.
         var slaveText by remember { mutableStateOf("1") }
-        var targetText by remember { mutableStateOf("32.5") }
+        var targetText by remember { mutableStateOf("33.0") }
         var hccQuietText by remember { mutableStateOf("300") }
 
         val logs = remember { mutableStateListOf<String>() }

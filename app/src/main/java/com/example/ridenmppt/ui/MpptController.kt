@@ -14,6 +14,7 @@ class MpptRuntimeConfig(
     @Volatile var hccQuietS: Double = hccQuietS
 }
 
+@Suppress("LocalVariableName")
 class MpptController(
     private val io: ModbusIo,
     private val emit: (String) -> Unit,
@@ -96,10 +97,6 @@ class MpptController(
     }
 
     suspend fun run(stopRequested: () -> Boolean) {
-        val VSET_DROP_BATT_FULL = 0.60
-
-        val VIN_BAND = 0.00
-        val HARD_DROP = 5.0
 
         val I_MIN = 0.01
         val I_MAX = 24.0
@@ -108,14 +105,7 @@ class MpptController(
         val LOOP_DELAY_S = 0.20
 
         val HCC_STEP_V = 0.10
-        val HCC_OFFSET_MIN_V = -2.00
-        val HCC_OFFSET_MAX_V = 2.00
         val HCC_DECAY_STABLE_EPS = 0.50
-
-        val RECOVERY_WINDOW_S = 6.0
-        val RECOVERY_ERR_V = 1.50
-        val RECOVERY_GAIN = 2.0
-        val RECOVERY_MIN_POUT_W = 100.0
 
         val V1 = 0.25
         val V2 = 0.50
@@ -133,13 +123,17 @@ class MpptController(
         val FINE_STEP_UP = 0.01
         val FINE_STEP_DN = 0.01
 
-        val FULL_I = 4.00
-        val REDUCED_DISABLE_I = FULL_I + 8.0
+        val FULL_I = 7.00                   // Current indicating full battery
+        val FULL_I_MS = (5.0 * 1000.0)      // Must be < FULL_I for this long (while V-limited) before "FUL"/VSET reduction
+        val REDUCED_DISABLE_I = 12.0        // Return to true max volts when current exceeds this
+        val HIGH_CURRENT_I = 12.0           // High current mode
+        val VSET_DROP_BATT_FULL = 0.60      // Reduce max volts to this when battery full
+        val DRIFT_CLAMP_LOW = -3.00          // Don't drift low further than this
+        val DRIFT_CLAMP_HIGH = 3.00          // Don't drift high further than this
+
 
         val CONSTV_ENTER_EPS = 0.05
         val CONSTV_EXIT_EPS = 0.10
-
-        val HIGH_CURRENT_I = FULL_I + 8.0
 
         val MAX_CONSEC_READ_FAIL = 3
         var consecReadFail = 0
@@ -194,6 +188,8 @@ class MpptController(
         var vsetBase: Double? = null
         var vsetReduced = false
 
+        var fullSoakStartMs: Long? = null
+
         emit(
             "START T_USER=${"%.2f".format(tUserNow)}V " +
                     "(TARGET_VIN=${"%.2f".format(targetVin)}V) " +
@@ -216,6 +212,8 @@ class MpptController(
                 continue
             }
 
+            val nowMs = System.currentTimeMillis()
+
             if (vsetBase == null) vsetBase = st.vset
 
             if (isVLtd) {
@@ -224,7 +222,15 @@ class MpptController(
                 if (st.outv >= (st.vset - CONSTV_ENTER_EPS)) isVLtd = true
             }
 
-            val isSoaking = isVLtd && (st.iout < FULL_I)
+            // "Full soak" gating: require V-limited AND iout < FULL_I continuously for FULL_I_MS
+            val fullSoakCondition = isVLtd && (st.iout < FULL_I)
+            if (fullSoakCondition) {
+                if (fullSoakStartMs == null) fullSoakStartMs = nowMs
+            } else {
+                fullSoakStartMs = null
+            }
+
+            val isSoaking = fullSoakStartMs != null && (nowMs - fullSoakStartMs!!) >= FULL_I_MS
             val isHighCurrent = st.iout >= HIGH_CURRENT_I
 
             val statusNow = when {
@@ -238,17 +244,17 @@ class MpptController(
             if (!isVLtd) {
                 targetVin = quantVolts(tUserNow + hccOffset)
             } else {
-                lastNoHccMs = System.currentTimeMillis()
+                lastNoHccMs = nowMs
             }
 
             val hccTrigger = if (!isVLtd) st.vin < (targetVin - 5.0) else false
 
             if (hccTrigger && !doingHcc) {
                 doingHcc = true
-                lastNoHccMs = System.currentTimeMillis()
+                lastNoHccMs = nowMs
 
                 if (firstHccIgnored) {
-                    hccOffset = clamp(hccOffset + HCC_STEP_V, -2.00, 2.00)
+                    hccOffset = clamp(hccOffset + HCC_STEP_V, DRIFT_CLAMP_LOW, DRIFT_CLAMP_HIGH)
                 } else {
                     firstHccIgnored = true
                 }
@@ -258,11 +264,10 @@ class MpptController(
 
             if (!hccTrigger && doingHcc) {
                 doingHcc = false
-                lastNoHccMs = System.currentTimeMillis()
-                lastHccExitMs = System.currentTimeMillis()
+                lastNoHccMs = nowMs
+                lastHccExitMs = nowMs
             }
 
-            val nowMs = System.currentTimeMillis()
             val quietMs = (runtime.hccQuietS * 1000.0).toLong()
 
             if (!isVLtd && !doingHcc && (nowMs - lastNoHccMs) >= quietMs) {
@@ -318,7 +323,7 @@ class MpptController(
                     band = "FI"
                 }
 
-                if ((System.currentTimeMillis() - lastHccExitMs) <= (6.0 * 1000.0).toLong()) {
+                if ((nowMs - lastHccExitMs) <= (6.0 * 1000.0).toLong()) {
                     if (errVin > 1.50 && st.pout >= 100.0) {
                         stepUp = minOf(stepUp * 2.0, HUGE_STEP_UP)
                     }
@@ -327,18 +332,14 @@ class MpptController(
                 stepUp = quantAmps(stepUp)
                 stepDn = quantAmps(stepDn)
 
-                var stepUsed = 0.0
                 var newIset = when {
                     errVin > 0.0 -> {
-                        stepUsed = stepUp
                         isetCmd + stepUp
                     }
-                    errVin < -0.0 -> {
-                        stepUsed = -stepDn
+                    errVin < 0.0 -> {
                         isetCmd - stepDn
                     }
                     else -> {
-                        stepUsed = 0.0
                         isetCmd
                     }
                 }
@@ -347,7 +348,6 @@ class MpptController(
 
                 if (newIset > iceil && isVLtd) {
                     newIset = iceil
-                    stepUsed = 9.99
                 }
 
                 if (newIset != isetCmd) {
